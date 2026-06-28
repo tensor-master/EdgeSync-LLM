@@ -1,0 +1,6 @@
+{
+  "name": "EdgeSync LLM",
+  "description": "A semantic cache SDK and dashboard intercepting local LLM requests before they reach the NPU/GPU to reduce energy draw and response latency.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
