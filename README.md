@@ -219,8 +219,12 @@ aarch64-linux-gnu-gcc -O3 -march=armv8.2-a+fp16 \
 
 ## License
 
-This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)** — see the [LICENSE](LICENSE) file for details.
+## ⚠️ Commercial & Licensing Notice
 
-**What this means in practice:** any company that integrates this KV cache engine into a product or service — including as a backend microservice accessible over a network — must release their entire modified source code under the same AGPL-3.0 license. There is no ASP loophole.
+**EdgeSync-LLM** is published under the **Business Source License 1.1 (BUSL-1.1)**.
+* **Non-Commercial & Evaluation:** 100% Free to use, modify, and test.
+* **Commercial Production Use:** Strictly prohibited for production deployment (mobile apps, SaaS, embedded hardware) without a commercial license.
 
-**Commercial licensing:** for integration without AGPL restrictions (proprietary products, enterprise SaaS, embedded OEM), contact: **wajdi.kechaou@[your-domain]**
+On **July 1, 2029**, this version of the software will automatically transition to the **AGPL-3.0** license.
+
+*To obtain a commercial production license, enterprise support, or custom hardware tuning (ARM NEON/NPU), contact:* **[kechaouwajdi@gmail.com]**
