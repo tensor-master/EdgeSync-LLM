@@ -214,3 +214,13 @@ aarch64-linux-gnu-gcc -O3 -march=armv8.2-a+fp16 \
 - [ ] Persistent fragment store (LevelDB or SQLite blob storage for `Keys/Values`)
 - [ ] Real embedding model integration (currently: simulated in benchmark)
 - [ ] Android JNI bridge update for `adapter/` package (pending Kotlin bindings)
+
+---
+
+## License
+
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)** — see the [LICENSE](LICENSE) file for details.
+
+**What this means in practice:** any company that integrates this KV cache engine into a product or service — including as a backend microservice accessible over a network — must release their entire modified source code under the same AGPL-3.0 license. There is no ASP loophole.
+
+**Commercial licensing:** for integration without AGPL restrictions (proprietary products, enterprise SaaS, embedded OEM), contact: **wajdi.kechaou@[your-domain]**
