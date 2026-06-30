@@ -147,15 +147,23 @@ type SignedFragment struct {
 //   LayerEnd   (int32 little-endian)
 //   LayerStride (int32 little-endian)
 //   ContentHash (64-char hex SHA-256, fixed length)
+//   MerkleRoot (64-char hex SHA-256, fixed length — see merkle.go)
 //   ExpiresAt  (int64 Unix timestamp, little-endian)
 //   Engine     (length-prefixed UTF-8)
 //
-// Tensor data (Keys/Values) is intentionally excluded — signing 24MB of
-// float32 data takes ~50ms on Cortex-A55. The ContentHash (SHA-256 of TokenIDs)
-// provides sufficient integrity: a valid ContentHash implies valid tensors
-// for a deterministic model.
+// Raw tensor data (Keys/Values) is intentionally excluded from direct signing —
+// signing 24MB of float32 data takes ~50ms on Cortex-A55. Instead, MerkleRoot
+// (computed cheaply per-layer, see security/merkle.go) commits to the tensor
+// content: any single-layer corruption changes the root, and the HMAC over
+// the root then transitively protects every layer's bytes. ContentHash alone
+// (SHA-256 of TokenIDs) only proves the *input* was unmodified, not that the
+// *computed tensors* match — MerkleRoot closes that gap.
+//
+// Fragments whose tensor layout doesn't support per-layer splitting (e.g. the
+// ONNX header-prefixed wire format) get MerkleRoot = "" and degrade gracefully
+// to ContentHash-only integrity, matching pre-Merkle behavior.
 func canonicalPayload(f *cache.KVFragment) []byte {
-	buf := make([]byte, 0, 256)
+	buf := make([]byte, 0, 320)
 
 	// FragmentID (length-prefixed)
 	buf = appendLenPrefixed(buf, []byte(f.ID))
@@ -173,6 +181,9 @@ func canonicalPayload(f *cache.KVFragment) []byte {
 	// ContentHash (fixed 64 bytes)
 	buf = append(buf, []byte(f.ContentHash)...)
 
+	// MerkleRoot (length-prefixed; empty for layouts that don't support per-layer split)
+	buf = appendLenPrefixed(buf, []byte(fragmentMerkleRootHex(f)))
+
 	// ExpiresAt (8 bytes, Unix timestamp)
 	binary.LittleEndian.PutUint64(tmp[:], uint64(f.ExpiresAt.Unix()))
 	buf = append(buf, tmp[:]...)
@@ -181,6 +192,18 @@ func canonicalPayload(f *cache.KVFragment) []byte {
 	buf = appendLenPrefixed(buf, []byte(f.Engine))
 
 	return buf
+}
+
+// fragmentMerkleRootHex computes the Merkle root for a fragment's tensor blocks.
+// Returns "" if the tree cannot be built (e.g. non-uniform layout like ONNX's
+// header-prefixed format) — Sign/Verify degrade gracefully to ContentHash-only
+// integrity in that case.
+func fragmentMerkleRootHex(f *cache.KVFragment) string {
+	tree, err := BuildMerkleTree(f)
+	if err != nil {
+		return ""
+	}
+	return tree.RootHex()
 }
 
 func appendLenPrefixed(dst, src []byte) []byte {
