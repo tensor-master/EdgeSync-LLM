@@ -2,7 +2,7 @@ Business Source License 1.1
 
 Parameters
 
-Licensor:             bossandboss (Wajdi Kechaou)
+Licensor:             tensor-master (Wajdi Kechaou)
 Licensed Work:        EdgeSync-LLM (including all source code, submodules,
                       adapters, tensor reshaping engines, and documentation).
                       The Licensed Work is (c) 2024 Wajdi Kechaou
@@ -54,7 +54,7 @@ For production use in commercial applications, SaaS platforms, or mobile
 applications deployed to end-users, a separate commercial license is required.
 
 Contact:
-  GitHub:  https://github.com/bossandboss/EdgeSync-LLM/issues
+  GitHub:  https://github.com/tensor-master/EdgeSync-LLM/issues
   Label:   commercial-license
 
 ----------------------------------------------------------------------
