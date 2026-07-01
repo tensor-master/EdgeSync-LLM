@@ -53,47 +53,34 @@ package adapter
 // #include <stdlib.h>
 // #include <string.h>
 //
-// // extract_kv_layer: copies keys and values for one layer into caller-allocated buffers.
-// // Returns 0 on success, -1 if the layer index or tensor name is invalid.
-// int extract_kv_layer(struct llama_context* ctx, int layer, int token_start, int token_count,
-//                      float* keys_out, float* values_out, int head_dim, int num_kv_heads) {
-//     // llama.cpp b3117+: named tensors "cache_k_l%d" and "cache_v_l%d"
-//     char k_name[64], v_name[64];
-//     snprintf(k_name, sizeof(k_name), "cache_k_l%d", layer);
-//     snprintf(v_name, sizeof(v_name), "cache_v_l%d", layer);
+// // The three functions below (edgesync_extract_layer_raw, edgesync_layer_sizes,
+// // edgesync_inject_layer_raw) are NOT defined here — they're compiled into
+// // libllama.so itself, from src/edgesync_kv_bridge.cpp, added to llama.cpp's
+// // own CMakeLists.txt. That file needs internal headers (llama-kv-cache.h)
+// // that aren't part of llama.cpp's public API, so it must be compiled as
+// // part of llama.cpp's own build tree, not linked in externally.
+// //
+// // WHY: the previous version of this preamble called llama_get_model_tensor(),
+// // which does not exist in llama.cpp (confirmed by linking against a real
+// // build: "undefined reference to llama_get_model_tensor"). See
+// // src/edgesync_kv_bridge.cpp in your llama.cpp checkout for the real
+// // implementation and its fragility notes (only supports the standard
+// // unified KV cache, not iSWA/DSA/DSV4/hybrid memory architectures).
+// //
+// // If you're building against a llama.cpp checkout that does NOT have
+// // edgesync_kv_bridge.cpp added to its build, these will fail to link.
+// // Apply that patch to your llama.cpp checkout first (or vendor a fork).
 //
-//     struct ggml_tensor* k_tensor = llama_get_model_tensor(llama_get_model(ctx), k_name);
-//     struct ggml_tensor* v_tensor = llama_get_model_tensor(llama_get_model(ctx), v_name);
-//     if (!k_tensor || !v_tensor) return -1;
+// int edgesync_extract_layer_raw(struct llama_context* ctx, int32_t layer,
+//     void* keys_out, size_t keys_out_capacity, size_t* out_k_nbytes,
+//     void* vals_out, size_t vals_out_capacity, size_t* out_v_nbytes);
 //
-//     int stride = num_kv_heads * head_dim;
-//     size_t copy_bytes = (size_t)(token_count * stride) * sizeof(float);
-//     size_t offset_bytes = (size_t)(token_start * stride) * sizeof(float);
+// int edgesync_layer_sizes(struct llama_context* ctx, int32_t layer,
+//     size_t* out_k_nbytes, size_t* out_v_nbytes);
 //
-//     ggml_backend_tensor_get(k_tensor, keys_out,   offset_bytes, copy_bytes);
-//     ggml_backend_tensor_get(v_tensor, values_out, offset_bytes, copy_bytes);
-//     return 0;
-// }
-//
-// // inject_kv_layer: writes keys and values back for one layer.
-// int inject_kv_layer(struct llama_context* ctx, int layer, int token_start, int token_count,
-//                     const float* keys_in, const float* values_in, int head_dim, int num_kv_heads) {
-//     char k_name[64], v_name[64];
-//     snprintf(k_name, sizeof(k_name), "cache_k_l%d", layer);
-//     snprintf(v_name, sizeof(v_name), "cache_v_l%d", layer);
-//
-//     struct ggml_tensor* k_tensor = llama_get_model_tensor(llama_get_model(ctx), k_name);
-//     struct ggml_tensor* v_tensor = llama_get_model_tensor(llama_get_model(ctx), v_name);
-//     if (!k_tensor || !v_tensor) return -1;
-//
-//     int stride = num_kv_heads * head_dim;
-//     size_t copy_bytes = (size_t)(token_count * stride) * sizeof(float);
-//     size_t offset_bytes = (size_t)(token_start * stride) * sizeof(float);
-//
-//     ggml_backend_tensor_set(k_tensor, keys_in,   offset_bytes, copy_bytes);
-//     ggml_backend_tensor_set(v_tensor, values_in, offset_bytes, copy_bytes);
-//     return 0;
-// }
+// int edgesync_inject_layer_raw(struct llama_context* ctx, int32_t layer,
+//     const void* keys_in, size_t keys_in_size,
+//     const void* vals_in, size_t vals_in_size);
 import "C"
 
 import (
@@ -101,7 +88,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"time"
 	"unsafe"
 
 	"github.com/bossandboss/EdgeSync-LLM/cache"
@@ -168,10 +154,10 @@ func LoadLlamaCppModel(ggufPath string, modelID cache.ModelID, nCtx, nThreads, n
 	ctxParams.n_threads = C.int32_t(nThreads)
 	ctxParams.n_threads_batch = C.int32_t(nThreads)
 
-	ctx := C.llama_new_context_with_params(model, ctxParams)
+	ctx := C.llama_init_from_model(model, ctxParams)
 	if ctx == nil {
 		C.llama_free_model(model)
-		return nil, fmt.Errorf("LoadLlamaCppModel: llama_new_context_with_params failed for %q (n_ctx=%d, n_threads=%d)", ggufPath, nCtx, nThreads)
+		return nil, fmt.Errorf("LoadLlamaCppModel: llama_init_from_model failed for %q (n_ctx=%d, n_threads=%d)", ggufPath, nCtx, nThreads)
 	}
 
 	return &LlamaCppAdapter{
@@ -212,47 +198,52 @@ func (a *LlamaCppAdapter) ExtractFragment(
 
 	tokenCount := len(tokenIDs)
 	model := a.modelID
-	numHeads := model.NumKVHeads
-	headDim := model.HeadDim
-	floatsPerLayer := tokenCount * numHeads * headDim
 
 	// Count layers to capture
 	var layersCaptured []int
 	for l := layerStart; l < layerEnd; l += layerStride {
 		layersCaptured = append(layersCaptured, l)
 	}
-	totalFloats := len(layersCaptured) * floatsPerLayer
-
-	// Allocate output buffers (float32 = 4 bytes each)
-	keysFloat := make([]float32, totalFloats)
-	valsFloat := make([]float32, totalFloats)
 
 	// Run prefill decode to populate the KV cache
 	// (In a real implementation, call llama_decode() with the token batch here)
 	// For now, the extraction assumes decode has already run.
 
-	// Extract layer by layer
-	for idx, layer := range layersCaptured {
-		offset := idx * floatsPerLayer
+	// NOTE ON SCOPE: edgesync_extract_layer_raw (see src/edgesync_kv_bridge.cpp
+	// in the llama.cpp checkout this links against) returns the FULL current
+	// per-layer K/V storage tensor, not a [token_start, token_start+token_count)
+	// slice — the original code here assumed a token-range extraction that the
+	// underlying tensor layout doesn't necessarily support without further
+	// verification against a real running model (padding/permutation in the
+	// cache's cell layout was not confirmed). This concatenates whole-layer
+	// tensors across the requested layer range; the byte size per layer is
+	// whatever llama.cpp currently allocates for it, not necessarily
+	// tokenCount*numHeads*headDim*4 as the old code assumed.
+	var keysBytes, valsBytes []byte
 
-		ret := C.extract_kv_layer(
-			a.ctx,
-			C.int(layer),
-			C.int(0), // always extract from token 0 (full prefix)
-			C.int(tokenCount),
-			(*C.float)(unsafe.Pointer(&keysFloat[offset])),
-			(*C.float)(unsafe.Pointer(&valsFloat[offset])),
-			C.int(headDim),
-			C.int(numHeads),
-		)
-		if ret != 0 {
-			return nil, fmt.Errorf("llamacpp: extract_kv_layer failed for layer %d", layer)
+	for _, layer := range layersCaptured {
+		var kSize, vSize C.size_t
+		sizeRet := C.edgesync_layer_sizes(a.ctx, C.int32_t(layer), &kSize, &vSize)
+		if sizeRet != 0 {
+			return nil, fmt.Errorf("llamacpp: edgesync_layer_sizes failed for layer %d (code %d) — unsupported memory architecture (iSWA/DSA/DSV4/hybrid) or invalid layer", layer, int(sizeRet))
 		}
-	}
 
-	// Serialize float32 slices to bytes (little-endian)
-	keysBytes := float32SliceTo4Bytes(keysFloat)
-	valsBytes := float32SliceTo4Bytes(valsFloat)
+		kBuf := make([]byte, int(kSize))
+		vBuf := make([]byte, int(vSize))
+		var kWritten, vWritten C.size_t
+
+		extractRet := C.edgesync_extract_layer_raw(
+			a.ctx, C.int32_t(layer),
+			unsafe.Pointer(&kBuf[0]), kSize, &kWritten,
+			unsafe.Pointer(&vBuf[0]), vSize, &vWritten,
+		)
+		if extractRet != 0 {
+			return nil, fmt.Errorf("llamacpp: edgesync_extract_layer_raw failed for layer %d (code %d)", layer, int(extractRet))
+		}
+
+		keysBytes = append(keysBytes, kBuf[:int(kWritten)]...)
+		valsBytes = append(valsBytes, vBuf[:int(vWritten)]...)
+	}
 
 	fragmentID := generateFragmentID(tokenIDs, model)
 
@@ -277,37 +268,47 @@ func (a *LlamaCppAdapter) InjectFragment(ctx context.Context, fragment *cache.KV
 		return fmt.Errorf("llamacpp InjectFragment: %w", err)
 	}
 
-	model := a.modelID
-	tokenCount := fragment.TokenSpan()
-	numHeads := model.NumKVHeads
-	headDim := model.HeadDim
-	floatsPerLayer := tokenCount * numHeads * headDim
+	// NOTE: matches ExtractFragment's new scope — fragment.Keys/Values are
+	// now whole per-layer tensors concatenated across [LayerStart, LayerEnd),
+	// not a token-range slice. edgesync_inject_layer_raw rejects the write if
+	// the byte size doesn't match what the tensor currently expects (this is
+	// itself a integrity check: it will correctly fail on a real token-span
+	// mismatch, since llama.cpp's own tensor allocation size is the source
+	// of truth here rather than a separately-computed floatsPerLayer).
+	numLayers := 0
+	for l := fragment.LayerStart; l < fragment.LayerEnd; l += fragment.LayerStride {
+		numLayers++
+	}
+	if numLayers == 0 {
+		return fmt.Errorf("llamacpp InjectFragment: empty layer range [%d, %d)", fragment.LayerStart, fragment.LayerEnd)
+	}
 
-	keysFloat := bytesToFloat32Slice(fragment.Keys)
-	valsFloat := bytesToFloat32Slice(fragment.Values)
-
+	kOffset, vOffset := 0, 0
 	layerIdx := 0
 	for l := fragment.LayerStart; l < fragment.LayerEnd; l += fragment.LayerStride {
-		offset := layerIdx * floatsPerLayer
-
-		if offset+floatsPerLayer > len(keysFloat) {
-			return fmt.Errorf("llamacpp: tensor buffer underflow at layer %d (offset %d, need %d, have %d)",
-				l, offset, floatsPerLayer, len(keysFloat))
+		var kSize, vSize C.size_t
+		sizeRet := C.edgesync_layer_sizes(a.ctx, C.int32_t(l), &kSize, &vSize)
+		if sizeRet != 0 {
+			return fmt.Errorf("llamacpp: edgesync_layer_sizes failed for layer %d (code %d)", l, int(sizeRet))
 		}
 
-		ret := C.inject_kv_layer(
-			a.ctx,
-			C.int(l),
-			C.int(fragment.TokenStart),
-			C.int(tokenCount),
-			(*C.float)(unsafe.Pointer(&keysFloat[offset])),
-			(*C.float)(unsafe.Pointer(&valsFloat[offset])),
-			C.int(headDim),
-			C.int(numHeads),
+		kEnd := kOffset + int(kSize)
+		vEnd := vOffset + int(vSize)
+		if kEnd > len(fragment.Keys) || vEnd > len(fragment.Values) {
+			return fmt.Errorf("llamacpp: fragment buffer underflow at layer %d (need %d/%d bytes, have %d/%d)",
+				l, kEnd, vEnd, len(fragment.Keys), len(fragment.Values))
+		}
+
+		ret := C.edgesync_inject_layer_raw(
+			a.ctx, C.int32_t(l),
+			unsafe.Pointer(&fragment.Keys[kOffset]), kSize,
+			unsafe.Pointer(&fragment.Values[vOffset]), vSize,
 		)
 		if ret != 0 {
-			return fmt.Errorf("llamacpp: inject_kv_layer failed for layer %d", l)
+			return fmt.Errorf("llamacpp: edgesync_inject_layer_raw failed for layer %d (code %d) — likely a size mismatch between this fragment and the current model's tensor layout", l, int(ret))
 		}
+
+		kOffset, vOffset = kEnd, vEnd
 		layerIdx++
 	}
 
@@ -346,7 +347,12 @@ func (a *LlamaCppAdapter) ClearKVCache(_ context.Context) error {
 	if a.ctx == nil {
 		return nil
 	}
-	C.llama_kv_cache_clear(a.ctx)
+	// llama_kv_cache_clear(ctx) was renamed to llama_memory_clear(mem, data)
+	// in current llama.cpp — it now operates on the llama_memory_t handle
+	// rather than the context directly. data=true clears the underlying
+	// buffers too, matching the old function's behavior.
+	mem := C.llama_get_memory(a.ctx)
+	C.llama_memory_clear(mem, C.bool(true))
 	return nil
 }
 
