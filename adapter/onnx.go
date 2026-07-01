@@ -304,36 +304,3 @@ func bytesToFloat32SliceONNX(src []byte) []float32 {
 	}
 	return out
 }
-
-// Pending state for stateless ONNX injection pattern.
-// Stored on the struct so InjectFragment and Generate can share state
-// within a single request lifecycle.
-func init() {
-	// Extend ONNXAdapter struct at runtime via embedding is not possible in Go.
-	// The pending state fields are declared directly on ONNXAdapter below.
-}
-
-// Re-declare ONNXAdapter with pending state fields.
-// (Go doesn't support forward declarations; these fields are used in InjectFragment/Generate.)
-type onnxPendingState struct {
-	pendingPastKeys [][]float32
-	pendingPastVals [][]float32
-	pendingTokenEnd int
-}
-
-// Attach pending state to adapter.
-// This is a zero-cost embedding — no allocation, no vtable.
-var onnxState = make(map[*ONNXAdapter]*onnxPendingState)
-
-// Override the field access in InjectFragment/Generate with map lookup.
-// This avoids modifying the struct declaration above (which would require
-// re-exporting the constructor). In production code, merge onnxPendingState
-// fields directly into ONNXAdapter.
-func getONNXState(a *ONNXAdapter) *onnxPendingState {
-	if s, ok := onnxState[a]; ok {
-		return s
-	}
-	s := &onnxPendingState{}
-	onnxState[a] = s
-	return s
-}
