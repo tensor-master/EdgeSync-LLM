@@ -55,9 +55,21 @@ func NewHNSW(m int, efSearch int) *HNSW {
 }
 
 // cosineDistance calculates the cosine distance (1.0 - cosine_similarity).
+// When built with CGO enabled, this tries the accelerated C path in
+// cosine_neon.c (NEON on ARM, portable scalar C elsewhere) first; the
+// pure-Go path below is always available as a fallback and is the only
+// path used in no-CGO host builds (see README "Host build" mode).
 func cosineDistance(a, b []float32) float32 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 1.0
+	}
+	if sim, ok := cosineSimilarityAccelerated(a, b); ok {
+		if sim > 1.0 {
+			sim = 1.0
+		} else if sim < -1.0 {
+			sim = -1.0
+		}
+		return 1.0 - sim
 	}
 	var dot, normA, normB float32
 	for i := range a {

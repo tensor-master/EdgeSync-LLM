@@ -258,6 +258,12 @@ func SparsifyFragment(f *KVFragment, cfg SparsificationConfig) (*KVFragment, *Sp
 	model := f.Model
 	keysPerLayer := len(f.Keys) / numLayers
 	valsPerLayer := len(f.Values) / numLayers
+	if keysPerLayer != valsPerLayer {
+		return nil, nil, fmt.Errorf(
+			"SparsifyFragment: Keys layer size (%d bytes) does not match Values layer size (%d bytes) — "+
+				"fragment tensors are malformed or from an engine with asymmetric K/V layout", keysPerLayer, valsPerLayer,
+		)
+	}
 	floatsPerToken := model.NumKVHeads * model.HeadDim
 	bytesPerToken := floatsPerToken * 4
 

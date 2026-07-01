@@ -1,6 +1,7 @@
 package security
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,7 @@ func TestValidateEmbedding_TooLong(t *testing.T) {
 
 func TestValidateEmbedding_NaN(t *testing.T) {
 	vec := make([]float32, 384)
-	vec[100] = float32(0) / float32(0) // NaN
+	vec[100] = float32(math.NaN())
 	if err := ValidateEmbedding(vec); err == nil {
 		t.Error("expected error for embedding containing NaN")
 	}
@@ -48,7 +49,7 @@ func TestValidateEmbedding_NaN(t *testing.T) {
 
 func TestValidateEmbedding_Inf(t *testing.T) {
 	vec := make([]float32, 384)
-	vec[50] = 1e39 // overflow
+	vec[50] = float32(math.Inf(1)) // overflow
 	if err := ValidateEmbedding(vec); err == nil {
 		t.Error("expected error for embedding containing Inf")
 	}

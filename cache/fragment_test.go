@@ -17,10 +17,10 @@ func makeTestModel() ModelID {
 	}
 }
 
-func makeTestTokenIDs(n int) []int32 {
+func makeTestTokenIDs(offset, n int) []int32 {
 	ids := make([]int32, n)
 	for i := range ids {
-		ids[i] = int32(i + 100)
+		ids[i] = int32(offset + i + 100)
 	}
 	return ids
 }
@@ -40,7 +40,7 @@ func makeTestTensor(layers, tokens, heads, dim int) []byte {
 
 func TestNewFragment_ValidInputs(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 	emb := make([]float32, 384)
@@ -69,7 +69,7 @@ func TestNewFragment_ValidInputs(t *testing.T) {
 
 func TestNewFragment_TokenSpanTooSmall(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(32) // below FragmentGranularityTokens=64
+	tokenIDs := makeTestTokenIDs(0, 32) // below FragmentGranularityTokens=64
 	keys := makeTestTensor(12, 32, 8, 64)
 	vals := makeTestTensor(12, 32, 8, 64)
 
@@ -83,7 +83,7 @@ func TestNewFragment_TokenSpanTooSmall(t *testing.T) {
 func TestNewFragment_TokenSpanTooLarge(t *testing.T) {
 	model := makeTestModel()
 	span := FragmentMaxTokenSpan + 100
-	tokenIDs := makeTestTokenIDs(span)
+	tokenIDs := makeTestTokenIDs(0, span)
 	keys := makeTestTensor(12, span, 8, 64)
 	vals := makeTestTensor(12, span, 8, 64)
 
@@ -96,7 +96,7 @@ func TestNewFragment_TokenSpanTooLarge(t *testing.T) {
 
 func TestNewFragment_LayerStrideTooSmall(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -109,7 +109,7 @@ func TestNewFragment_LayerStrideTooSmall(t *testing.T) {
 
 func TestNewFragment_LayerEndExceedsModel(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -122,7 +122,7 @@ func TestNewFragment_LayerEndExceedsModel(t *testing.T) {
 
 func TestNewFragment_EmptyKeys(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 
 	_, err := NewFragment("id", model, 0, 128, 0, 24, 2,
 		[]byte{}, []byte{1, 2, 3}, tokenIDs, nil, "llamacpp", "b3117", DefaultTTLSession)
@@ -133,7 +133,7 @@ func TestNewFragment_EmptyKeys(t *testing.T) {
 
 func TestNewFragment_TokenIDsMismatch(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(64) // only 64, but span=128
+	tokenIDs := makeTestTokenIDs(0, 64) // only 64, but span=128
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -183,7 +183,7 @@ func TestModelID_String(t *testing.T) {
 
 func TestFragment_IsExpired_Fresh(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -197,7 +197,7 @@ func TestFragment_IsExpired_Fresh(t *testing.T) {
 
 func TestFragment_IsExpired_Past(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -211,7 +211,7 @@ func TestFragment_IsExpired_Past(t *testing.T) {
 
 func TestFragment_RecordHit_IncrementsCount(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -228,7 +228,7 @@ func TestFragment_RecordHit_IncrementsCount(t *testing.T) {
 
 func TestFragment_Promote_ExtendsExpiry(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -250,7 +250,7 @@ func TestFragment_Promote_ExtendsExpiry(t *testing.T) {
 
 func TestFragment_RecordHit_AutoPromotes(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -285,7 +285,7 @@ func TestFragment_NumLayersCovered(t *testing.T) {
 	}
 
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 
 	for _, tt := range tests {
 		// Build enough fake tensor data
@@ -319,7 +319,7 @@ func TestFragment_NumLayersCovered(t *testing.T) {
 
 func TestFragment_StorageKey_Format(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 
@@ -338,7 +338,7 @@ func TestFragment_StorageKey_Format(t *testing.T) {
 
 func TestFragment_StorageKey_UniquePerFragment(t *testing.T) {
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(128)
+	tokenIDs := makeTestTokenIDs(0, 128)
 	keys := makeTestTensor(12, 128, 8, 64)
 	vals := makeTestTensor(12, 128, 8, 64)
 

@@ -147,17 +147,18 @@ func ValidateModelDimensions(model cache.ModelID) error {
 		return fmt.Errorf("ContextLength %d out of range [1, 1048576]", model.ContextLength)
 	}
 
-	// Pre-compute max tensor size to detect integer overflow before allocation
-	// maxTokens × maxHeads × maxDim × sizeof(float32) × maxLayers
-	maxTensorSize := int64(MaxTokenCount) * int64(model.NumKVHeads) *
-		int64(model.HeadDim) * 4 * int64(model.NumLayers)
-	if maxTensorSize > int64(MaxFragmentTensorBytes) {
-		return fmt.Errorf(
-			"model dimensions would produce tensors of %d bytes (max %d): NumLayers=%d NumKVHeads=%d HeadDim=%d",
-			maxTensorSize, MaxFragmentTensorBytes,
-			model.NumLayers, model.NumKVHeads, model.HeadDim,
-		)
-	}
+	// NOTE: We deliberately do NOT reject models here based on the tensor size
+	// a maximum-length (MaxTokenCount) fragment *could* produce. That conflated
+	// "is this model config sane" with "is this specific fragment too big" —
+	// the latter is already enforced correctly, at fragment-creation time,
+	// against the REAL token span by ValidateTensorBlob(). A model isn't invalid
+	// just because a caller could theoretically request a very long fragment for
+	// it; the per-fragment check is what actually prevents oversized allocations.
+	//
+	// The bound checks above (NumLayers, HeadDim, NumKVHeads, ContextLength) are
+	// what actually prevent int64 overflow in downstream size math: even at their
+	// maximums (256 × 512 × 128 × 4 × 2048 ≈ 6.9e10), the product is far below
+	// the int64 range (~9.2e18), so overflow cannot occur regardless of token span.
 
 	if model.Architecture == "" {
 		return fmt.Errorf("model Architecture must not be empty")

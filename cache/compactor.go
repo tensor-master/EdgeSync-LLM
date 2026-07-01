@@ -55,6 +55,16 @@ import (
 	"time"
 )
 
+// shortID returns up to the first 8 characters of id, safely handling IDs
+// shorter than 8 characters (e.g. test fixtures, short hashes) without
+// panicking on an out-of-range slice.
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Compactor
 // ─────────────────────────────────────────────────────────────────────────────
@@ -508,7 +518,7 @@ func buildMergedFragment(a, b *KVFragment, mergedSpan, mergedTokenEnd int, keys,
 		expiresAt = b.ExpiresAt
 	}
 
-	id := fmt.Sprintf("merged_%s_%s", a.ID[:8], b.ID[:8])
+	id := fmt.Sprintf("merged_%s_%s", shortID(a.ID), shortID(b.ID))
 
 	f := &KVFragment{
 		ID:              id,

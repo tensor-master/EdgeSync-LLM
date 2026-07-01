@@ -3,6 +3,7 @@ package cache
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -152,8 +153,6 @@ func (de *DifferentialEngine) handlePartialHit(prompt string, queryVec []float32
 		_, _ = de.DB.Exec("UPDATE cache_entries SET hit_count = hit_count + 1 WHERE id = ?", parentID)
 	}()
 
-	totalLatency := time.Since(start).Seconds() * 1000.0
-	
 	// Partial reduction estimate: prefix size compared to total response size
 	npuReduction := (float64(len(cachedPrefix)) / float64(len(fullResponse))) * 100.0
 	if npuReduction > 90.0 {

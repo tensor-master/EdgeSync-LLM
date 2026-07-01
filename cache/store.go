@@ -322,7 +322,7 @@ func (s *FragmentStore) loadFromDB(id string) (*KVFragment, error) {
 
 	// Load tensor blobs from disk (lazy: only Keys/Values, not hot-cached metadata)
 	// Validate blob sizes before reading — catch truncated files from crashes.
-	expectedBlobBytes := f.NumLayersCovered() * f.TokenSpan() * model.NumKVHeads * model.HeadDim * 4
+	expectedBlobBytes := f.NumLayersCovered() * f.TokenSpan() * f.Model.NumKVHeads * f.Model.HeadDim * 4
 	if err := validateBlobSize(keysPath, expectedBlobBytes); err != nil {
 		// Corrupted blob — delete and treat as miss
 		go s.deleteFromDB(f.ID, keysPath, valsPath)

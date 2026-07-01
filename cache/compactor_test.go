@@ -12,7 +12,7 @@ import (
 func makeFragment(id string, tokenStart, tokenEnd, hitCount int) *KVFragment {
 	model := makeTestModel()
 	span := tokenEnd - tokenStart
-	tokenIDs := makeTestTokenIDs(span)
+	tokenIDs := makeTestTokenIDs(tokenStart, span)
 	numLayers := 12
 	keys := makeTestTensor(numLayers, span, 8, 64)
 	vals := makeTestTensor(numLayers, span, 8, 64)

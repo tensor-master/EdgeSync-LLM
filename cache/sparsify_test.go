@@ -7,7 +7,7 @@ import (
 func makeSparsifyTestFragment(t *testing.T, tokens int) *KVFragment {
 	t.Helper()
 	model := makeTestModel()
-	tokenIDs := makeTestTokenIDs(tokens)
+	tokenIDs := makeTestTokenIDs(0, tokens)
 	numLayers := 12
 	keys := make([]byte, numLayers*tokens*model.NumKVHeads*model.HeadDim*4)
 	vals := make([]byte, numLayers*tokens*model.NumKVHeads*model.HeadDim*4)
