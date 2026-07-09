@@ -46,7 +46,7 @@
 //   CGO_CFLAGS="-I/path/to/llama.cpp" CGO_LDFLAGS="-L/path/to/llama.cpp/build -lllama" go build
 package adapter
 
-// #cgo CFLAGS: -I../../llama.cpp
+// #cgo CFLAGS: -I../../llama.cpp/include -I../../llama.cpp/ggml/include
 // #cgo LDFLAGS: -L../../llama.cpp/build -lllama -lm
 //
 // #include "llama.h"
