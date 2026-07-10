@@ -8,8 +8,10 @@
 #include <stdio.h>
 #include <math.h>
 
-#if defined(__ARM_NEON) && defined(__ARM_FP16_ARGS)
+#if defined(__ARM_NEON)
 #include <arm_neon.h>
+#endif
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
 
 /**
  * @brief Calculates the cosine similarity between two 384-dimensional float16 vectors using NEON intrinsics.
