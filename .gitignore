@@ -1,3 +1,4 @@
 results/
 edgebench.exe
 *.exe
+edgebench_arm64
