@@ -1,238 +1,290 @@
-# EdgeSync-LLM — KV Fragment Engine for Local LLMs
+# EdgeSync-LLM — KV Cache Reuse for Local LLMs
 
-A **engine-agnostic KV cache fragment system** for on-device LLM inference.
-Designed for ARM64 Android (Cortex-A55/A78), portable to any platform running
-llama.cpp, MLC-LLM, or ONNX Runtime.
+Skip the prefill. When two prompts share a long prefix — a system preamble, a
+reused RAG chunk, a document, a few-shot block — the second one should not pay
+to recompute what the first already computed.
 
----
+EdgeSync captures the engine's KV cache state after the prefix is prefilled,
+stores it, and restores it on the next request that shares that prefix. The
+model then decodes only the new tokens.
 
-## What this is
+**Measured: 7.5× lower time-to-first-token on cache hits, with output identical
+to the uncached path.** Details and caveats below — including what is *not* yet
+proven.
 
-A **reusable KV cache layer** that sits between the application and the LLM
-engine. Instead of re-running the full prefill on every request, it stores
-slices of the attention KV tensors (Keys and Values), retrieves them via
-approximate nearest-neighbor search (HNSW), and injects them directly into
-the engine's KV cache — skipping the most expensive part of inference.
-
-This is not a "semantic cache" that stores response strings. It stores the
-**actual transformer KV tensors**, identified by token range and layer range,
-and reconstructs them at request time.
+Targets ARM64 Android; currently benchmarked on x86-64.
 
 ---
 
-## Architecture
+## Status
 
-```
-              [ PROMPT ]
-                  │
-                  ▼
-         [ Embedding Model ]        MiniLM-L6-v2 (384-dim, ~8ms CPU)
-                  │
-                  ▼
-           [ HNSW Index ]           Pure Go, M=16, efSearch=50
-                  │
-          ┌───────┴───────────────────────────┐
-          │                                   │
-    sim ≥ 0.92                          0.75 ≤ sim < 0.92       sim < 0.75
-          │                                   │                      │
-   ┌──────▼──────┐                  ┌─────────▼──────┐      ┌───────▼────────┐
-   │ EXACT HIT   │                  │  PARTIAL HIT   │      │     MISS       │
-   │             │                  │                │      │                │
-   │ Inject KV   │                  │ Inject prefix  │      │ Full prefill   │
-   │ fragment    │                  │ Generate delta │      │ Extract frag.  │
-   │ ~8ms TTFT   │                  │ ~280ms TTFT    │      │ Store in HNSW  │
-   └─────────────┘                  └────────────────┘      └────────────────┘
-          │                                   │                      │
-          └───────────────────────────────────┴──────────────────────┘
-                                              │
-                                     [ KVAdapter Layer ]
-                                              │
-                         ┌────────────────────┼─────────────────────┐
-                         ▼                    ▼                     ▼
-                  [ llamacpp ]           [ mlc-llm ]         [ onnx runtime ]
-                 (GGML tensor API)    (TVM paged KV)      (past_key_values)
-```
+This project publishes what it can prove, and marks the rest.
+
+| | |
+|---|---|
+| ✅ **Validated** | KV state reuse via llama.cpp's public state API. TTFT speedup measured, correctness verified (see below). Links against **vanilla llama.cpp** — no fork, no patch. |
+| ⚠️ **Unvalidated** | Semantic (approximate) prefix matching. Fragment compaction. Persistent store. Android JNI bridge. |
+| ⛔ **Not sound as designed** | `PARTIAL` hits (reusing a fragment across *similar* rather than *identical* prefixes). Cross-engine fragment reuse. Per-layer striding. See [Known limitations](#known-limitations). |
+| ❌ **Not measured** | Anything on-device. All numbers here are x86-64. |
 
 ---
 
-## File Structure
+## How it works
 
 ```
-├── cache/
-│   ├── fragment.go          ← KVFragment: formal definition of a cache unit
-│   │                          (dimensions, TTL, eviction policy, storage key)
-│   ├── differential.go      ← DifferentialEngine: EXACT / PARTIAL / MISS router
-│   └── schema.go            ← SQLite WAL schema for fragment metadata
-│
-├── adapter/
-│   ├── interface.go         ← KVAdapter: engine-agnostic contract
-│   │                          (ExtractFragment / InjectFragment / Generate)
-│   ├── llamacpp.go          ← llama.cpp adapter (GGML tensor API, CGO)
-│   ├── mlc.go               ← MLC-LLM adapter (TVM paged KV, mlc4j)
-│   └── onnx.go              ← ONNX Runtime adapter (past_key_values)
-│
-├── core/
-│   ├── hnsw.go              ← Pure Go HNSW index (M=16, efSearch=50)
-│   └── cosine_neon.c        ← ARM NEON fp16 cosine similarity
-│
-├── sdk/android/
-│   └── EdgeSyncLLM.kt       ← Kotlin JNI bridge (suspend coroutines)
-│
-├── monitor/
-│   └── energy_android.go    ← Android /sys/class/power_supply/ profiler
-│
-├── prefetch/
-│   └── predictor.go         ← N-gram prefetch predictor (top-3 candidates)
-│
-└── benchmark/
-    └── runner.go            ← Falsifiable benchmark: 3 modes × 1000 requests
+                        [ PROMPT = PREFIX + SUFFIX ]
+                                    │
+                     ┌──────────────┴──────────────┐
+                     │  lookup on the PREFIX only  │
+                     └──────────────┬──────────────┘
+                                    │
+                  ┌─────────────────┴──────────────────┐
+                  │                                    │
+           prefix seen before                   prefix is new
+                  │                                    │
+        ┌─────────▼──────────┐              ┌──────────▼──────────┐
+        │  RESTORE state     │              │  Full prefill       │
+        │  llama_state_seq_  │              │  Capture state via  │
+        │    set_data        │              │  llama_state_seq_   │
+        │                    │              │    get_data         │
+        │  Decode SUFFIX     │              │  Store fragment     │
+        │  from pos = |prefix|              │                     │
+        └─────────┬──────────┘              └──────────┬──────────┘
+                  │                                    │
+                  └────────────────┬───────────────────┘
+                                   ▼
+                            [ FIRST TOKEN ]
 ```
+
+The fragment is scoped to the **shared prefix**, never to the whole prompt.
+A fragment covering the full prompt would bake in the varying user turn; injecting
+it for a different request would generate from a KV cache that does not
+correspond to that request's tokens.
+
+### Why the public state API, and not raw tensor surgery
+
+The obvious implementation copies the K/V tensors out of the cache and writes
+them back later. It does not work, and it fails *silently*.
+
+llama.cpp tracks, per cell, a position and a sequence id, and builds its attention
+mask from those. A raw tensor write moves the numbers but not the bookkeeping: the
+cache still believes the sequence is empty, attention never sees the injected
+cells, and the next decode reallocates over them.
+
+The fragment becomes **inert** — fast, because the prefix is skipped, and wrong,
+because the prefix is gone. Our first implementation did exactly this and reported
+an 8.8× speedup. The correctness harness showed that 14 of 24 cache hits
+reproduced, token for token, the output of a generation with *no prefix at all*.
+That speedup was dropped context, not cache reuse.
+
+`llama_state_seq_get_data` / `llama_state_seq_set_data` serialise cells **and**
+metadata, for every layer. They are public, upstream, and require no fork. See
+[`attic/`](attic/) for the abandoned bridge and its post-mortem.
+
+---
+
+## Measured results
+
+x86-64 (Windows, MinGW64, 4 threads), Qwen2.5-0.5B-Instruct Q4_K_M, vanilla
+llama.cpp, 123-token shared prefix, 133-token prompts, 40 requests, 3 timed
+repeats each.
+
+| TTFT | mean | p50 | p95 |
+|---|---|---|---|
+| Cold (no cache) | 1395 ms | 1363 ms | 1571 ms |
+| Fragment reuse | 185 ms | 185 ms | 223 ms |
+
+**7.5× on cache hits.** Cold 95% CI [1351, 1439] ms.
+
+Breakdown of the 185 ms warm path: ~106 ms decoding the 10-token suffix, ~79 ms
+restoring the state blob. Fragment size **1.65 MB** for a 123-token prefix.
+
+Hit rate was 60%, but that is a property of the synthetic corpus, not of any
+real workload. **The citable number is the speedup on hits, with the hit rate
+stated beside it.**
+
+### Correctness
+
+A latency number from a cache that changes the model's output is worthless. Two
+checks run on every benchmark, and both must pass before any speedup is reported.
+
+**Output equivalence.** The first token generated on the warm path must equal the
+first token the cold path produces for the same prompt. Result: **24/24**.
+
+**Inert-fragment control.** The model also generates from the *suffix alone*, with
+no prefix and no injection. If the warm output matched this, the fragment would be
+contributing nothing. Result: **0/24**.
+
+Timing cannot distinguish a working fragment from an ignored one — both skip the
+prefix computation, so both are fast. Only the output separates them. The
+inert-fragment control is what makes the speedup falsifiable, and it is why the
+raw-tensor implementation was caught rather than published.
+
+Reproduce: [`benchmark/real/BENCHMARK.md`](benchmark/real/BENCHMARK.md).
+Manifest: `results/bench-measured-20260710-055842.json`.
+
+> **These are not on-device numbers.** They are x86-64. A Cortex-A55 is roughly an
+> order of magnitude slower per core; absolute TTFT will be in seconds. The
+> speedup is a ratio and should largely hold, but that is a prediction, not a
+> measurement. ARM64 results pending.
 
 ---
 
 ## The KVFragment
 
-The **atomic unit** of the cache. Formally defined in `cache/fragment.go`.
+`cache/fragment.go`.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `TokenStart / TokenEnd` | int | Token range covered `[start, end)` |
-| `LayerStart / LayerEnd` | int | Transformer layers captured |
-| `LayerStride` | int | Sampling interval (2 = every other layer) |
-| `Keys / Values` | `[]byte` | Raw attention tensors (engine-serialized) |
-| `TokenIDs` | `[]int32` | Input tokens → used to verify prefix |
-| `ContentHash` | string | SHA-256 of TokenIDs (not tensors) |
-| `EmbeddingVector` | `[]float32` | 384-dim semantic vector for HNSW lookup |
-| `ExpiresAt` | time.Time | TTL: 30 min (session) → 7 days (promoted) |
-| `HitCount` | int | Auto-promotes at hit ≥ 5 |
-| `Engine` | string | "llamacpp" / "mlc" / "onnx" |
+| Field | Meaning |
+|---|---|
+| `TokenStart / TokenEnd` | Token range covered `[start, end)` — the shared prefix |
+| `LayerStart / LayerEnd / LayerStride` | Always `0 / NumLayers / 1`. The state blob covers every layer; striding is not expressible and was never sound |
+| `Keys` | The opaque `llama_state_seq_get_data` blob — cells **and** metadata |
+| `Values` | Sentinel `EDGESYNC-SEQSTATE-v1`, so a fragment from an incompatible extractor cannot be injected |
+| `TokenIDs` | Prefix tokens, used to verify the prefix matches |
+| `ContentHash` | SHA-256 of `TokenIDs` (not of tensors: tensors differ by epsilon across runs) |
+| `EmbeddingVector` | 384-dim vector for HNSW lookup |
+| `ExpiresAt` / `HitCount` | TTL 30 min (session) → 7 days (promoted at hit ≥ 5) |
+| `Engine` / `EngineVersion` | The blob format is engine- **and version-** specific |
 
-**Invariants enforced at construction:**
-
-- `TokenSpan ∈ [64, 2048]` tokens
-- `LayerEnd ≤ model.NumLayers`
-- `len(TokenIDs) == TokenSpan`
-- `len(Keys) > 0 && len(Values) > 0`
-- `LayerStride ≥ 1`
+Invariants enforced at construction: `TokenSpan ∈ [64, 2048]`,
+`LayerEnd ≤ model.NumLayers`, `len(TokenIDs) == TokenSpan`, `LayerStride ≥ 1`,
+`Keys` and `Values` non-empty.
 
 ---
 
-## The KVAdapter Interface
+## The KVAdapter interface
 
-Defined in `adapter/interface.go`. Any engine implements 6 methods:
+`adapter/interface.go`. Six methods:
 
 ```go
-ExtractFragment(ctx, tokenIDs, layerStart, layerEnd, layerStride, embedding)
-    → *KVFragment, error
-
-InjectFragment(ctx, fragment)
-    → error
-
-Generate(ctx, prompt, startTokenPos, maxTokens)
-    → text string, tokensGenerated int, error
-
-Tokenize(ctx, text)
-    → []int32, error
-
-ClearKVCache(ctx)
-    → error
-
-Close()
-    → error
+Tokenize(ctx, text)                                    → []int32
+ExtractFragment(ctx, tokenIDs, lStart, lEnd, lStride, embedding) → *KVFragment
+InjectFragment(ctx, fragment)                          → error
+Generate(ctx, prompt, startTokenPos, maxTokens)        → text, nTokens, error
+ClearKVCache(ctx)                                      → error
+Close()                                                → error
 ```
 
-Cross-engine reuse: engine B can inject a fragment from engine A if and only if
-B lists A in `CompatibleWith()`. Current compatibility matrix:
+`Generate`'s `startTokenPos` is the number of prompt tokens whose KV state is
+already present. `0` means cold (prefill everything); `fragment.TokenEnd` means
+warm (prefill only the suffix). That skipped prefill is the entire product.
 
-| Producer → Consumer | llamacpp | mlc | onnx |
-|---|:---:|:---:|:---:|
-| **llamacpp** | ✓ | — | — |
-| **mlc** | — | ✓ | — |
-| **onnx** | — | — | ✓ |
-
-Cross-engine reuse (e.g. llamacpp → onnx) requires a KV tensor reshape adapter
-(transpose `[seq, heads, dim]` → `[heads, seq, dim]`). Not implemented yet.
-
----
-
-## Benchmark
-
-The benchmark in `benchmark/runner.go` compares 3 modes over 1000 requests
-drawn from 8 semantic prompt clusters (64 unique prompts + 4 variants each).
-
-**Timing model** (not ad-hoc random ranges — derived from Cortex-A55 measurements):
-
-| Constant | Value | Source |
-|---|---|---|
-| Prefill | 6.8 ms/token | llama.cpp bench, Snapdragon 685 |
-| Generate | 18.4 ms/token | same |
-| HNSW search | 3.2 ms | N=1000, efSearch=50 |
-| Fragment inject | 0.029 ms/MB | LPDDR4X bandwidth |
-| Fragment size | ~6 MB | 128 tokens, 12 layers, Q4_K_M |
-
-**Expected results:**
-
-| Mode | Avg TTFT | Hit rate | Mem BW | Energy |
-|---|---|---|---|---|
-| Baseline (no cache) | ~1800 ms | 0% | 100% | 253 mAh |
-| Naive string cache | ~1600 ms | ~12% | ~88% | 222 mAh |
-| **Fragment cache** | **~350 ms** | **~70%** | **~35%** | **88 mAh** |
-
-Run:
-```bash
-go run ./benchmark/
-
-# Verbose per-query output:
-EDGESYNC_VERBOSE=1 go run ./benchmark/
-```
+Only the **llama.cpp adapter is real**. `adapter/mlc.go` and `adapter/onnx.go`
+compile against their engines' APIs but have never been run against a loaded
+model.
 
 ---
 
 ## Building
 
+Requires CGO and a llama.cpp build. **No patch, no fork.**
+
 ```bash
-# Host build (benchmark only, no CGO):
-go run ./benchmark/
+# 1. Build vanilla llama.cpp (static or shared)
+git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp && cmake -B build && cmake --build build --target llama -j8
 
-# Android ARM64 (with llama.cpp CGO):
-export CGO_CFLAGS="-I/path/to/llama.cpp"
-export CGO_LDFLAGS="-L/path/to/llama.cpp/build -lllama -lm"
-CGO_ENABLED=1 CC=aarch64-linux-gnu-gcc GOOS=linux GOARCH=arm64 \
-    go build -o edgecache ./...
+# 2. Host benchmark, no model, exercises the harness only (prints SIMULATED)
+go run ./benchmark/real/
 
-# NEON cosine module (ARM64 only):
-aarch64-linux-gnu-gcc -O3 -march=armv8.2-a+fp16 \
-    -c core/cosine_neon.c -o core/cosine_neon.o
+# 3. Real benchmark against a real model
+export CGO_CFLAGS="-I/path/to/llama.cpp/include -I/path/to/llama.cpp/ggml/include"
+export CGO_LDFLAGS="-L/path/to/llama.cpp/build/src -L/path/to/llama.cpp/build/ggml/src \
+  -Wl,--start-group -lllama -l:ggml.a -l:ggml-base.a -l:ggml-cpu.a -Wl,--end-group \
+  -lgomp -lstdc++ -lm"
+
+CGO_ENABLED=1 go build -tags realdevice -o edgebench ./benchmark/real/
+
+./edgebench -model-path model.gguf \
+  -arch qwen -layers 24 -kv-heads 2 -head-dim 64 -nctx 4096 -threads 4 \
+  -n 40 -repeats 3 -warmup 1 -prefix-share 0.8
 ```
+
+Set `-layers/-kv-heads/-head-dim` to match the GGUF you load; fragments are
+rejected on `ModelID` mismatch. Set `OMP_NUM_THREADS` explicitly — a latency
+number without a fixed thread count is not reproducible.
+
+The `-tags realdevice` build links the real engine. Without it you get a mock and
+every output is stamped `SIMULATED`.
 
 ---
 
-## What is implemented
+## Known limitations
 
-- [x] **Cross-engine KV tensor reshape** (`adapter/reshape.go`) — transpose `[seq,heads,dim] ↔ [heads,seq,dim]` between llamacpp and ONNX Runtime; `CanInjectWithReshape()` handles detection and fallback automatically
-- [x] **Fragment compaction** (`cache/compactor.go`) — deduplication by `ContentHash`, grouping by layer config, adjacency merge with per-engine tensor concatenation (axis 0 for llamacpp, axis 1 per-head for ONNX); merged embedding is a weighted normalized average
-- [x] **Persistent fragment store** (`cache/store.go`) — two-tier storage: `sync.Map` hot cache + SQLite WAL for metadata; tensor blobs written as `<id>.keys.bin` / `<id>.vals.bin` to avoid SQLite page fragmentation; `QueryByTokenRange()` for prefix-range lookups
-- [x] **Real embedding model** (`embedding/minilm.go`) — `ORTEncoder` runs all-MiniLM-L6-v2 (22 MB, 384-dim, ~8ms on Cortex-A55) via ONNX Runtime; `FallbackEncoder` (FNV-1a hash) activates automatically if the `.ort` model file is not found
-- [x] **Android JNI bridge** (`sdk/android/EdgeSyncLLM.kt` + `sdk/android/jni_bridge.go`) — full rewrite exposing the `adapter/` package API: `nativeInitialize`, `nativeEmbed`, `nativeLookup`, `nativeInjectFragment`, `nativeGenerateFromPos`, `nativeExtractAndStore`, `nativeCompact`, `nativeReshapeFragment`
+**No on-device measurement.** Everything above is x86-64.
+
+**`PARTIAL` hits are not sound.** The router (`cache/differential.go`) classifies
+a lookup as `PARTIAL` when cosine similarity falls in `[0.75, 0.92)`. But a
+fragment holds the KV state of prefix *A*. Injecting it to serve a merely
+*similar* prefix *B* means generating from a cache that does not correspond to
+B's tokens — the output is wrong, and the correctness check would reject it. In
+every run to date `partial = 0`, so this path has never actually executed. It
+should either be removed or redefined as "longest common prefix", which is a
+different mechanism.
+
+**The semantic layer is unproven, and may be unnecessary.** Correct KV reuse
+requires the prefix to match **byte for byte**. For that, a hash or a radix tree
+is exact and O(1) — which is what vLLM (prefix caching) and SGLang
+(RadixAttention) do. The HNSW index and MiniLM embeddings only ever produced
+`EXACT` hits on byte-identical prefixes. Their value over a hash is not
+demonstrated.
+
+**Cross-engine reuse is dead on this path.** A `llama_state_seq` blob is specific
+to llama.cpp *and to its serialization version*. `adapter/reshape.go` transposes
+raw tensors between layouts; it does not apply to opaque state blobs. The
+compatibility matrix in earlier revisions of this README claimed both "not
+implemented" and "implemented" — neither was true in the sense that mattered.
+
+**Per-layer striding cannot preserve output.** `LayerStride = 2` stored 12 of 24
+layers. The skipped layers hold no KV for the prefix, so their attention reads
+empty cells. Fixed to `1`; the constant is retained only for schema compatibility.
+
+**Fragment memory.** 1.65 MB per 123-token prefix, and it scales with prefix
+length and layer count. On a phone this is the binding constraint, not TTFT.
+Eviction and TTL exist in `cache/` but their policies are untuned and unmeasured.
+
+**Correctness compares one token.** The `-maxgen` flag is declared but not wired;
+`Generate` is always called with `maxTokens = 1`. A single token is nonetheless
+decisive *here*, because the inert-fragment control provides the contrast: the
+same token cleanly separated 14/24 inert (raw tensors) from 0/24 (state API).
+Multi-token comparison would still be a stronger check.
+
+**Unvalidated components.** `cache/compactor.go`, `cache/store.go`,
+`prefetch/predictor.go`, `monitor/energy_android.go`, and
+`sdk/android/jni_bridge.go` compile and have unit tests, but none has been
+exercised end-to-end against a running model on a device.
+
+---
+
+## Roadmap
+
+1. ARM64 cross-compile and an `adb`-driven run on a real phone. This is the only
+   step that converts "latency accelerator" into "on-device latency accelerator".
+2. Wire `-maxgen`; compare full generated strings, not one token.
+3. Replace or justify the semantic lookup. Benchmark HNSW against a radix tree on
+   the same corpus. If the radix tree wins, delete the index.
+4. Measure `llama_state_seq_set_data` cost as a function of prefix length. It is
+   ~79 ms at 123 tokens; if it grows linearly it will eventually erase the gain.
+5. Resolve `PARTIAL`: remove it, or reimplement as longest-common-prefix reuse.
 
 ---
 
 ## License
 
-This project is licensed under the **Business Source License 1.1 (BUSL-1.1)** — see the [LICENSE](LICENSE) file for details.
+Business Source License 1.1 (BUSL-1.1) — see [LICENSE](LICENSE).
 
 | Parameter | Value |
 |---|---|
 | Licensor | bossandboss (Wajdi Kechaou) |
-| Licensed Work | EdgeSync-LLM (source, submodules, adapters, tensor engines, documentation) |
+| Licensed Work | EdgeSync-LLM (source, submodules, adapters, documentation) |
 | Additional Use Grant | Non-commercial use, research, evaluation, development, internal testing |
 | Change Date | July 1, 2029 |
-| Change License | GNU Affero General Public License v3.0 (AGPL-3.0) |
+| Change License | AGPL-3.0 |
 
-**What this means in practice:**
-- ✅ Free for research, evaluation, development, and internal testing
-- ✅ Source code is readable and forkable
-- ❌ Production use in commercial apps, SaaS platforms, or mobile apps deployed to end-users requires a commercial license
-- 🔄 On July 1, 2029, the project automatically becomes AGPL-3.0
+Free for research, evaluation, development, and internal testing. Production use
+in commercial apps, SaaS platforms, or shipped mobile apps requires a commercial
+license. On July 1, 2029 the project becomes AGPL-3.0 automatically.
 
-**Commercial licensing:** open an issue at [github.com/bossandboss/EdgeSync-LLM](https://github.com/bossandboss/EdgeSync-LLM/issues) with the label `commercial-license`.
+**Commercial licensing:** open an issue at
+[github.com/bossandboss/EdgeSync-LLM](https://github.com/bossandboss/EdgeSync-LLM/issues)
+with the label `commercial-license`.
